@@ -1,0 +1,207 @@
+//==============================================================================
+// File: TopCore.v
+// Description: Top-Level Module - Giao tiếp với Altera DE2 board
+//              Hỗ trợ nhập dữ liệu qua Switches/Buttons và xuất qua LEDs
+// Author: FPGA Design Engineer
+// Date: 2026-05-12
+//==============================================================================
+
+module TopCore (
+    // Clock & Reset
+    input  wire        clk,            // Đầu vào Clock từ board (50 MHz)
+    input  wire        reset_n,        // Reset (active low)
+    
+    // Switches (18 switches trên DE2)
+    input  wire [17:0] sw,             // Switches đầu vào
+    
+    // Push Buttons (4 buttons trên DE2)
+    input  wire [ 3:0] btn,            // Push buttons
+    
+    // Red LEDs (18 LEDs đỏ)
+    output wire [17:0] red_led,        // LED đỏ hiển thị kết quả thấp
+    
+    // Green LEDs (18 LEDs xanh)
+    output wire [17:0] green_led,      // LED xanh hiển thị kết quả cao
+    
+    // 7-Segment Displays (8 hiển thị 7-đoạn)
+    output wire [ 7:0] hex0, hex1, hex2, hex3,
+    output wire [ 7:0] hex4, hex5, hex6, hex7
+);
+
+//==============================================================================
+// Định nghĩa State Machine
+// States:
+//   IDLE      - Đợi người dùng chọn chế độ (OP hoặc LOAD_A hoặc LOAD_B)
+//   LOAD_A    - Nạp giá trị A từ switches
+//   LOAD_B    - Nạp giá trị B từ switches
+//   EXECUTE   - Thực thi phép toán và hiển thị kết quả
+//==============================================================================
+localparam STATE_IDLE    = 3'b000;
+localparam STATE_LOAD_A  = 3'b001;
+localparam STATE_LOAD_B  = 3'b010;
+localparam STATE_EXECUTE = 3'b011;
+
+//==============================================================================
+// Biến nội bộ
+//==============================================================================
+reg [ 2:0] state, next_state;       // State Machine
+reg [31:0] operand_a_reg;           // Thanh ghi lưu A
+reg [31:0] operand_b_reg;           // Thanh ghi lưu B
+reg [ 2:0] opcode_reg;              // Lưu mã lệnh
+reg [31:0] result_reg;              // Lưu kết quả ALU
+reg        zero_reg, carry_reg, overflow_reg, negative_reg;
+reg [31:0] display_data;            // Dữ liệu hiển thị 7-seg
+
+//==============================================================================
+// Instantiate Datapath
+//==============================================================================
+wire [31:0] result_alu;
+wire        zero_flag, carry_flag, overflow_flag, negative_flag;
+
+Datapath datapath (
+    .clk          (clk),
+    .reset_n      (reset_n),
+    .opcode       (opcode_reg),
+    .reg_addr_a   (5'b00000),
+    .reg_addr_b   (5'b00001),
+    .write_addr   (5'b00010),
+    .write_data   (result_alu),
+    .write_en     (1'b1),
+    .result       (result_alu),
+    .zero_flag    (zero_flag),
+    .carry_flag   (carry_flag),
+    .overflow_flag(overflow_flag),
+    .negative_flag(negative_flag)
+);
+
+//==============================================================================
+// State Machine (Sequential Logic)
+//==============================================================================
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin
+        state <= STATE_IDLE;
+        operand_a_reg <= 32'h00000000;
+        operand_b_reg <= 32'h00000000;
+        opcode_reg <= 3'b000;
+        result_reg <= 32'h00000000;
+        zero_reg <= 1'b0;
+        carry_reg <= 1'b0;
+        overflow_reg <= 1'b0;
+        negative_reg <= 1'b0;
+    end
+    else begin
+        state <= next_state;
+        
+        case (state)
+            STATE_IDLE: begin
+                // Chờ người dùng nhấn nút
+                if (btn[0]) begin  // Button 0: Load A
+                    operand_a_reg <= {{14{sw[17]}}, sw[17:0]};
+                end
+                if (btn[1]) begin  // Button 1: Load B
+                    operand_b_reg <= {{14{sw[17]}}, sw[17:0]};
+                end
+                if (btn[2]) begin  // Button 2: Execute operation
+                    opcode_reg <= sw[2:0];
+                end
+            end
+            
+            STATE_EXECUTE: begin
+                // Lưu kết quả từ ALU
+                result_reg <= result_alu;
+                zero_reg <= zero_flag;
+                carry_reg <= carry_flag;
+                overflow_reg <= overflow_flag;
+                negative_reg <= negative_flag;
+            end
+            
+            default: begin
+                // Default case - không làm gì
+            end
+        endcase
+    end
+end
+
+//==============================================================================
+// Next State Logic (Combinational)
+//==============================================================================
+always @(*) begin
+    case (state)
+        STATE_IDLE: begin
+            if (btn[2]) begin
+                next_state = STATE_EXECUTE;
+            end
+            else begin
+                next_state = STATE_IDLE;
+            end
+        end
+        
+        STATE_EXECUTE: begin
+            if (btn[0] | btn[1]) begin
+                next_state = STATE_IDLE;
+            end
+            else begin
+                next_state = STATE_EXECUTE;
+            end
+        end
+        
+        default: begin
+            next_state = STATE_IDLE;
+        end
+    endcase
+end
+
+//==============================================================================
+// LED Output Assignment
+// Red LEDs [17:0]: Hiển thị 18 bit thấp của Result
+// Green LEDs [17:0]: Hiển thị 18 bit cao của Result
+//==============================================================================
+assign red_led = result_reg[17:0];
+assign green_led = result_reg[31:14];
+
+//==============================================================================
+// 7-Segment Display Decoder (Hiển thị Result ở dạng HEX)
+// Chuyển đổi 4-bit thành mã 7-segment (active low)
+//==============================================================================
+function [7:0] hex_to_7seg;
+    input [3:0] hex;
+    begin
+        case (hex)
+            4'h0: hex_to_7seg = 8'b11000000;  // 0
+            4'h1: hex_to_7seg = 8'b11111001;  // 1
+            4'h2: hex_to_7seg = 8'b10100100;  // 2
+            4'h3: hex_to_7seg = 8'b10110000;  // 3
+            4'h4: hex_to_7seg = 8'b10011001;  // 4
+            4'h5: hex_to_7seg = 8'b10010010;  // 5
+            4'h6: hex_to_7seg = 8'b10000010;  // 6
+            4'h7: hex_to_7seg = 8'b11111000;  // 7
+            4'h8: hex_to_7seg = 8'b10000000;  // 8
+            4'h9: hex_to_7seg = 8'b10010000;  // 9
+            4'hA: hex_to_7seg = 8'b10001000;  // A
+            4'hB: hex_to_7seg = 8'b10000011;  // B
+            4'hC: hex_to_7seg = 8'b11000110;  // C
+            4'hD: hex_to_7seg = 8'b10100001;  // D
+            4'hE: hex_to_7seg = 8'b10000110;  // E
+            4'hF: hex_to_7seg = 8'b10001110;  // F
+            default: hex_to_7seg = 8'b11111111;
+        endcase
+    end
+endfunction
+
+//==============================================================================
+// Gán 7-Segment Displays
+// Hiển thị Result[31:0] trong 8 ký tự hex (từ HEX0 đến HEX7)
+//==============================================================================
+assign hex0 = hex_to_7seg(result_reg[3:0]);
+assign hex1 = hex_to_7seg(result_reg[7:4]);
+assign hex2 = hex_to_7seg(result_reg[11:8]);
+assign hex3 = hex_to_7seg(result_reg[15:12]);
+assign hex4 = hex_to_7seg(result_reg[19:16]);
+assign hex5 = hex_to_7seg(result_reg[23:20]);
+assign hex6 = hex_to_7seg(result_reg[27:24]);
+assign hex7 = hex_to_7seg(result_reg[31:28]);
+
+endmodule
+//==============================================================================
+// End of TopCore.v
+//==============================================================================
